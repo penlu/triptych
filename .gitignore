@@ -1,2 +1,3 @@
 # enabling gen-idea
 .idea*/
+target/
