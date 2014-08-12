@@ -46,7 +46,7 @@ package object codec {
    * into an integer, which is then shifted and masked to retrieve the appropriate bits.
    * These are used to construct a Color object.
    *
-   * The colors will be concatenated to the remainder of the stream using foldLeft.
+   * The colors will be concatenated to the remainder of the stream using reduceLeft.
    * Since this will attach the colors in reverse order, the colors themselves
    * are generated in reverse order as well.
    */
@@ -67,8 +67,8 @@ package object codec {
             magenta = (colorcode & 0x4) != 0,
             yellow = (colorcode & 0x1) != 0)
         })
-        .foldLeft[() => Stream[Color]](() => byteSeqToColorStream(tail))( // streaming the eight colors produced here:
-          (stream, next) => () => next #:: stream())() // stream held as function to enforce lazy evaluation
+        .reduceLeft[Stream[Color]]( // streaming the eight colors produced here
+          (stream, next) => next #:: stream) #::: byteSeqToColorStream(tail)
       }
 
       // unable to read 3 bytes -- convert remaining bytes and attach termination sequence
@@ -88,7 +88,6 @@ package object codec {
    * The input will be considered to end immediately before the last fully black module in the rectangle.
    *
    * A few possibilities arise involving the number of bytes N and the number of padding bits:
-   *
    * 1. We're missing one byte: so the bit assignment to the colors now looks like
    *     01100110 01101111 [00]
    *     AAABBBCC CDDDEEEF  FF
@@ -125,10 +124,10 @@ package object codec {
       new Color(cyan = (colorcode & 0x8) != 0,
         magenta = (colorcode & 0x4) != 0,
         yellow = (colorcode & 0x1) != 0)
-    }).foldLeft[Stream[Color]](
+    }).reduceLeft[Stream[Color]]((stream, next) => next #:: stream) #:::
       Stream(new Color(true, true, true), // termination sequence black module
         new Color(false, padding >= 2, padding >= 1), // indicator for appropriate number of padding bits
-        new Color(false, false, false)))((stream, next) => next #:: stream)
+        new Color(false, false, false))
   }
 
   /**
@@ -140,5 +139,13 @@ package object codec {
 
   // TODO: image generator class; automatically adds finding and timing patterns
 
-  // HOWTO: is there a way to get low-level printer control -- to avoid dpi moire problems?
+  // TODO: allow user printer selection
+
+  // TODO: obtain panel resolution from selected printer; calculate page counts
+
+  // TODOs left for encoding:
+  // 1. read files
+  // 2. error correction coding
+  // 3. colors into actual image
+  // 4. printing
 }
