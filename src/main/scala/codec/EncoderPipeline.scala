@@ -1,11 +1,13 @@
 import java.nio.ByteBuffer
 
+import scala.annotation.tailrec
+
 /**
  * # Encoder/Decoder - the codec!
  * This class contains code responsible for converting input data to error-correction-coded colors
  * suitable for printing on a page.
  */
-package object codec {
+object EncoderPipeline {
   /**
    * ## Converting Bytes to Colors
    * We need to convert bytes into colors for arrangement in an image.
@@ -67,7 +69,7 @@ package object codec {
             magenta = (colorcode & 0x4) != 0,
             yellow = (colorcode & 0x1) != 0)
         })
-        .reduceLeft[Stream[Color]]( // streaming the eight colors produced here
+        .foldLeft[Stream[Color]](Stream())( // streaming the eight colors produced here
           (stream, next) => next #:: stream) #::: byteSeqToColorStream(tail)
       }
 
@@ -124,28 +126,118 @@ package object codec {
       new Color(cyan = (colorcode & 0x8) != 0,
         magenta = (colorcode & 0x4) != 0,
         yellow = (colorcode & 0x1) != 0)
-    }).reduceLeft[Stream[Color]]((stream, next) => next #:: stream) #:::
+    }).foldLeft[Stream[Color]](Stream())((stream, next) => next #:: stream) #:::
       Stream(new Color(true, true, true), // termination sequence black module
         new Color(false, padding >= 2, padding >= 1), // indicator for appropriate number of padding bits
         new Color(false, false, false))
   }
 
   /**
-   * This case class stores a three-bit CMY color for the color stream.
+   * Method wraps a color stream into an image, completely defeating the point of saving memory by using streams.
+   *
+   * The actual image returned has width and height increased by 3 pixels each (@ 100 dpi, this is 0.03 in/<1 mm)
+   * due to addition of finder and timing patterns. The finder pattern is a solid one-pixel border surrounding the
+   * image, which enables image-recognition software to determine the boundaries of the contents. The timing pattern
+   * is an alternating strip of black and white pixels (beginning with black at the far upper left hand corner)
+   * extending across the top and left of the image, which allows imaging software to determine the number and
+   * placement of pixels in the image.
+   *
+   * It's up to the caller to determine that the amount of data in the stream will fit in the given width/height.
    */
-  case class Color(cyan: Boolean, magenta: Boolean, yellow: Boolean)
+  // TODO switch to use ArrayBuilder or some equivalent... no need to be fucking around with lists and such this way
+  // TODO how do you handle having excess colors in the sequence?
+  def colorsToImage(colors: Seq[Color], width: Int, height: Int): ColorPanel = {
+    import Color._ // get color definitions
 
-  // TODO: wrap color stream into an image
+    // method used to generate timing patterns:
+    // generates alternating colors with increasing index
+    def alternate(index: Int): Color = if (index % 2 == 0) BLACK else WHITE
 
-  // TODO: image generator class; automatically adds finding and timing patterns
+    // the image begins and ends with the finder pattern
+    // which forms a solid top and bottom black bar to the image
+    val finderPattern = (for (i <- 0 until width + 4) yield BLACK).toArray
 
-  // TODO: allow user printer selection
+    // the second row of the image contains a timer pattern
+    // delimited by black pixels from the finder pattern on the left and right
+    val timerPattern = (BLACK :: (for (i <- 0 until width + 2) yield alternate(i)).toList ::: BLACK :: List()).toArray
 
-  // TODO: obtain panel resolution from selected printer; calculate page counts
+    /**
+     * Splits the input color stream into rows by width and rows remaining.
+     */
+    @tailrec
+    def splitRows(colors: Seq[Color], width: Int, rowsLeft: Int, rowAccumulator: List[Seq[Color]]): List[Seq[Color]] = {
+      import Color._
 
-  // TODOs left for encoding:
-  // 1. read files
-  // 2. error correction coding
-  // 3. colors into actual image
-  // 4. printing
+      if (rowsLeft < 1) rowAccumulator // TODO what if there are colors remaining? return that for generation of another image? exception out??
+      else {
+        // split remaining color sequence
+        val (row, remainder) = colors.splitAt(width)
+
+        // row postprocessing: if it is not long enough, pad with white pixels
+        val length = row.length
+        val paddedRow = row ++: (if (length < width) (for (i <- 0 until width - length) yield BLACK).toList else List())
+
+        splitRows(remainder, width, rowsLeft - 1, paddedRow :: rowAccumulator)
+      }
+    }
+
+    // the colors, cut up into rows, are used to form the intermediate rows of the image, consisting of:
+    val imageData = splitRows(colors, width, height, List()).zipWithIndex
+      .map({case (split, index) =>
+      (BLACK ::                 // 1 black pixel (forming the left border of the finder pattern),
+        alternate(index + 1) :: // 1 pixel (from the timer pattern) that may be black or white, depending on the current row
+        split.toList :::        // the pixels of color data,
+        BLACK :: List())        // and a terminal black pixel
+    .toArray})                  // this list of pixels is converted into an array as a row
+
+    // now we form the image
+    val colordata = (
+      finderPattern :: // the first row is the finder pattern
+      timerPattern ::  // then a row of timer pattern
+      imageData :::    // then the color data, which is a block of rows
+      finderPattern :: // this is followed by the final row of the finder pattern
+      List()).toArray  // and now convert this list of arrays to an array of arrays
+
+    // insert the color data into the color panel and we are done
+    new ColorPanel(width, height, colordata)
+  }
+}
+
+/**
+ * This case class stores a three-bit CMY color for the color stream.
+ */
+case class Color(cyan: Boolean, magenta: Boolean, yellow: Boolean)
+
+/**
+ * We'll store color definitions here for convenience.
+ */
+object Color {
+  val BLACK = new Color(false, false, false)
+  val WHITE = new Color(true, true, true)
+}
+
+/**
+ * Need a class to store sized image data.
+ */
+class ColorPanel(val width: Int, val height: Int, pixels: Array[Array[Color]]) {
+  /**
+   * Gets the pixel at a specified row/column in the panel.
+   */
+  def apply(r: Int, c: Int): Color = {
+    // bounds checking with extensive error messages
+    if (r < 0) throw new IndexOutOfBoundsException("row index out of bounds: index is " + r + ", need a non-negative row index")
+    if (c < 0) throw new IndexOutOfBoundsException("col index out of bounds: index is " + c + ", need a non-negative col index")
+    if (r >= height) throw new IndexOutOfBoundsException("row index out of bounds: index is " + r + ", but height is " + height)
+    if (c >= width) throw new IndexOutOfBoundsException("col index out of bounds: index is " + c + ", but width is " + width)
+
+    // retrieve row: pixel data might not have correct row count, in which case an empty
+    // row is returned: column pixel retrieval will note no data and return a blank pixel
+    val row = if (r < pixels.length) pixels(r)
+    else Array[Color]()
+
+    // there is a possibility that input data is non-uniform row length (this should not be so!)
+    // if it is, we should just pass out blank pixels for missing data
+    if (c < row.length) row(c)
+    else new Color(false, false, false)
+  }
 }
