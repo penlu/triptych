@@ -52,7 +52,7 @@ object EncoderPipeline {
    * Since this will attach the colors in reverse order, the colors themselves
    * are generated in reverse order as well.
    */
-  def byteSeqToColorStream(bytes: Seq[Byte]): Stream[Color] = {
+  def bytesToColors(bytes: Seq[Byte]): Stream[Color] = {
     bytes match {
       // read exactly 3 bytes from byte sequence
       case b1 +: b2 +: b3 +: tail => {
@@ -65,12 +65,12 @@ object EncoderPipeline {
           val colorcode = (bits >> (3 * i)) & 0x00000007
 
           // create the color
-          new Color(cyan = (colorcode & 0x8) != 0,
-            magenta = (colorcode & 0x4) != 0,
+          new Color(cyan = (colorcode & 0x4) != 0,
+            magenta = (colorcode & 0x2) != 0,
             yellow = (colorcode & 0x1) != 0)
         })
         .foldLeft[Stream[Color]](Stream())( // streaming the eight colors produced here
-          (stream, next) => next #:: stream) #::: byteSeqToColorStream(tail)
+          (stream, next) => next #:: stream) #::: bytesToColors(tail)
       }
 
       // unable to read 3 bytes -- convert remaining bytes and attach termination sequence
@@ -84,9 +84,9 @@ object EncoderPipeline {
    * a termination symbol to the end of the input byte stream.
    *
    * The termination symbol consists of:
-   * 1. a single black module,
-   * 2. a module whose color indicates the number of padding bits, and
-   * 3. as many white modules as is required to fill out the rectangle
+   * 1. a single black module and
+   * 2. a module whose color indicates the number of padding bits
+   * followed by as many white modules as is required to fill out the rectangle.
    * The input will be considered to end immediately before the last fully black module in the rectangle.
    *
    * A few possibilities arise involving the number of bytes N and the number of padding bits:
@@ -110,8 +110,10 @@ object EncoderPipeline {
   private def terminateColorStream(bytes: Seq[Byte]): Stream[Color] = {
     // get concatenated bit sequence with padding bit count
     val (bits, padding) = bytes match {
-      case b1 +: b2 +: Seq() => (((b1 << 8) | b2) << 2, 2) // two padding bits
-      case b1 +: Seq() => (b1 << 1, 1) // one padding bit
+      case b1 +: b2 +: Seq() => (ByteBuffer.wrap(Array[Byte](0, 0, b1, b2)).getInt << 2, 2) // two padding bits
+      case b1 +: Seq() => {
+        (ByteBuffer.wrap(Array[Byte](0, 0, 0, b1)).getInt << 1, 1)
+      } // one padding bit
       case _ => (0, 0) // no padding bits -- if the sequence is nonempty, assume usage was to cut a stream short
     }
 
@@ -123,16 +125,16 @@ object EncoderPipeline {
       // extract the three bits comprising this color
       val colorcode = (bits >> (3 * i)) & 0x00000007
 
-      new Color(cyan = (colorcode & 0x8) != 0,
-        magenta = (colorcode & 0x4) != 0,
+      new Color(cyan = (colorcode & 0x4) != 0,
+        magenta = (colorcode & 0x2) != 0,
         yellow = (colorcode & 0x1) != 0)
     }).foldLeft[Stream[Color]](Stream())((stream, next) => next #:: stream) #:::
       Stream(new Color(true, true, true), // termination sequence black module
-        new Color(false, padding >= 2, padding >= 1), // indicator for appropriate number of padding bits
-        new Color(false, false, false))
+        new Color(false, padding >= 2, padding >= 1)) // indicator for appropriate number of padding bits
   }
 
   /**
+   * ## Color Stream to Image
    * Method wraps a color stream into an image, completely defeating the point of saving memory by using streams.
    *
    * The actual image returned has width and height increased by 3 pixels each (@ 100 dpi, this is 0.03 in/<1 mm)
